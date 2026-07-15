@@ -1,1 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Student Payment System</title>
+  <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; }
+    .bill-card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+    .status-Unpaid { background: #fee; color: #c00; }
+    .status-Pending-Review { background: #ffefcc; color: #b8860b; }
+    .status-Paid { background: #d4f7d4; color: #1a7a1a; }
+    .status-Rejected { background: #eee; color: #666; }
+    button { padding: 8px 14px; border: none; border-radius: 6px; background: #06c755; color: white; cursor: pointer; }
+    #uploadStatus { margin-top: 8px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h2>Student Payments</h2>
+  <div id="loginSection">
+    <p>Loading LINE profile...</p>
+  </div>
+  <div id="registerSection" style="display:none;">
+    <p>Enter your student ID to continue:</p>
+    <input type="text" id="studentIdInput" placeholder="e.g. 69010165">
+    <button onclick="submitRegistration()">Continue</button>
+  </div>
+  <div id="billsSection" style="display:none;">
+    <div id="billsList">Loading bills...</div>
+  </div>
 
+  <script>
+    const LIFF_ID = '2010706720-Tg6n2ibX';
+    const GAS_URL = 'https://script.google.com/macros/s/AKfycbwbBcaatoCwhh3qcE7vXTDELYCd7bArlp5PO90Y7Pt12a-XgudwTlXispXTvSpCc-Jc/exec';
+
+    let currentStudentId = null;
+
+    function gasPost(action, payload) {
+      return fetch(GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ action: action }, payload))
+      })
+        .then(res => res.json())
+        .then(res => {
+          if (!res.success) throw new Error(res.error || 'Unknown server error');
+          return res.data;
+        });
+    }
+
+    function gasGet(action, params) {
+      const query = new URLSearchParams(Object.assign({ action: action }, params || {}));
+      return fetch(GAS_URL + '?' + query.toString())
+        .then(res => res.json())
+        .then(res => {
+          if (!res.success) throw new Error(res.error || 'Unknown server error');
+          return res.data;
+        });
+    }
+
+    liff.init({ liffId: LIFF_ID })
+      .then(() => {
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return;
+        }
+        return liff.getProfile();
+      })
+      .then((profile) => {
+        if (!profile) return;
+        window.lineProfile = profile;
+        document.getElementById('loginSection').style.display = 'none';
+        document.getElementById('registerSection').style.display = 'block';
+      })
+      .catch((err) => {
+        document.getElementById('loginSection').innerText = 'LIFF init failed: ' + err.message;
+      });
+
+    function submitRegistration() {
+      const studentId = document.getElementById('studentIdInput').value.trim();
+      if (!studentId) { alert('Please enter your student ID'); return; }
+
+      gasPost('registerUser', {
+        lineId: window.lineProfile.userId,
+        name: window.lineProfile.displayName,
+        studentId: studentId
+      })
+        .then((res) => {
+          currentStudentId = res.studentId;
+          document.getElementById('registerSection').style.display = 'none';
+          document.getElementById('billsSection').style.display = 'block';
+          loadBills();
+        })
+        .catch((err) => alert('Registration failed: ' + err.message));
+    }
+
+    function loadBills() {
+      gasGet('getBills', { studentId: currentStudentId })
+        .then(renderBills)
+        .catch((err) => {
+          document.getElementById('billsList').innerText = 'Failed to load bills: ' + err.message;
+        });
+    }
+
+    function renderBills(bills) {
+      const container = document.getElementById('billsList');
+      if (!bills.length) {
+        container.innerHTML = '<p>No bills found.</p>';
+        return;
+      }
+
+      container.innerHTML = bills.map((bill, i) => `
+        <div class="bill-card">
+          <strong>${bill.title}</strong> (${bill.month})<br>
+          Amount: ${bill.amount} THB<br>
+          <span class="status status-${bill.status.replace(/\s+/g, '-')}">${bill.status}</span>
+          ${bill.status === 'Unpaid' || bill.status === 'Rejected' ? `
+            <div style="margin-top:8px;">
+              <input type="file" accept="image/*" id="slipInput_${i}" onchange="handleSlipSelect(this, '${bill.billId}', ${i})">
+              <div id="uploadStatus_${i}"></div>
+            </div>
+          ` : ''}
+        </div>
+      `).join('');
+    }
+
+    function handleSlipSelect(input, billId, index) {
+      const file = input.files[0];
+      if (!file) return;
+
+      const statusEl = document.getElementById('uploadStatus_' + index);
+      statusEl.innerText = 'Processing image...';
+
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        const img = new Image();
+        img.onload = function () {
+          const maxWidth = 1000;
+          const scale = Math.min(1, maxWidth / img.width);
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+          const base64Image = canvas.toDataURL('image/jpeg', 0.7);
+          uploadSlip(base64Image, billId, index);
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function uploadSlip(base64Image, billId, index) {
+      const statusEl = document.getElementById('uploadStatus_' + index);
+      statusEl.innerText = 'Uploading...';
+
+      gasPost('uploadPaymentSlip', {
+        studentId: currentStudentId,
+        billId: billId,
+        image: base64Image
+      })
+        .then(() => {
+          statusEl.innerText = 'Uploaded! Waiting for review.';
+          loadBills();
+        })
+        .catch((err) => {
+          statusEl.innerText = 'Upload failed: ' + err.message;
+        });
+    }
+  </script>
+</body>
+</html>
